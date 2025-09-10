@@ -1,0 +1,338 @@
+# Ansible Playbook for VPN Server Hardening
+# This playbook hardens Ubuntu servers for production VPN deployment
+
+---
+- name: Harden VPN Infrastructure
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # Security Configuration
+    ssh_port: 22
+    allowed_users: ['ubuntu', 'admin']
+    fail2ban_maxretry: 3
+    fail2ban_bantime: 3600
+    
+    # Firewall Configuration
+    ufw_rules:
+      - { rule: 'allow', port: '{{ ssh_port }}', proto: 'tcp' }
+      - { rule: 'allow', port: '51820', proto: 'udp' }
+      - { rule: 'allow', port: '80', proto: 'tcp' }
+      - { rule: 'allow', port: '443', proto: 'tcp' }
+      - { rule: 'allow', port: '8080', proto: 'tcp' }  # Health check
+    
+    # System Hardening
+    sysctl_params:
+      net.ipv4.ip_forward: 1
+      net.ipv6.conf.all.forwarding: 1
+      net.ipv4.conf.all.send_redirects: 0
+      net.ipv4.conf.default.send_redirects: 0
+      net.ipv4.conf.all.accept_redirects: 0
+      net.ipv4.conf.default.accept_redirects: 0
+      net.ipv4.conf.all.accept_source_route: 0
+      net.ipv4.conf.default.accept_source_route: 0
+      net.ipv4.conf.all.log_martians: 1
+      net.ipv4.conf.default.log_martians: 1
+      net.ipv4.icmp_echo_ignore_broadcasts: 1
+      net.ipv4.icmp_ignore_bogus_error_responses: 1
+      net.ipv4.tcp_syncookies: 1
+      kernel.dmesg_restrict: 1
+      kernel.kptr_restrict: 1
+      kernel.yama.ptrace_scope: 1
+    
+    # Log Retention (Privacy-focused)
+    log_retention_days: 7
+    
+  tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+    
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+    
+    - name: Install essential security packages
+      apt:
+        name:
+          - ufw
+          - fail2ban
+          - unattended-upgrades
+          - apt-listchanges
+          - logrotate
+          - rsyslog
+          - chrony
+          - rkhunter
+          - chkrootkit
+          - aide
+          - auditd
+        state: present
+    
+    - name: Configure automatic security updates
+      template:
+        src: templates/50unattended-upgrades
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        mode: '0644'
+        backup: yes
+    
+    - name: Enable automatic updates
+      template:
+        src: templates/20auto-upgrades
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: '0644'
+    
+    - name: Configure SSH hardening
+      template:
+        src: templates/sshd_config
+        dest: /etc/ssh/sshd_config
+        mode: '0600'
+        backup: yes
+      notify: restart ssh
+    
+    - name: Create SSH banner
+      copy:
+        content: |
+          **************************************************************************
+          * WARNING: This is a private VPN server. Unauthorized access prohibited. *
+          * All connections are monitored and logged.                              *
+          **************************************************************************
+        dest: /etc/issue.net
+        mode: '0644'
+    
+    - name: Configure fail2ban
+      template:
+        src: templates/jail.local
+        dest: /etc/fail2ban/jail.local
+        mode: '0644'
+        backup: yes
+      notify: restart fail2ban
+    
+    - name: Create custom fail2ban filter for WireGuard
+      template:
+        src: templates/wireguard.conf
+        dest: /etc/fail2ban/filter.d/wireguard.conf
+        mode: '0644'
+      notify: restart fail2ban
+    
+    - name: Configure UFW firewall
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+    
+    - name: Configure UFW rules
+      ufw:
+        rule: "{{ item.rule }}"
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+      loop: "{{ ufw_rules }}"
+    
+    - name: Apply sysctl security parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_set: yes
+        reload: yes
+      loop: "{{ sysctl_params | dict2items }}"
+    
+    - name: Configure log rotation for privacy
+      template:
+        src: templates/logrotate-vpn
+        dest: /etc/logrotate.d/vpn
+        mode: '0644'
+    
+    - name: Configure rsyslog for minimal logging
+      template:
+        src: templates/rsyslog.conf
+        dest: /etc/rsyslog.d/99-vpn.conf
+        mode: '0644'
+      notify: restart rsyslog
+    
+    - name: Configure chrony for time synchronization
+      template:
+        src: templates/chrony.conf
+        dest: /etc/chrony/chrony.conf
+        mode: '0644'
+        backup: yes
+      notify: restart chrony
+    
+    - name: Set timezone to UTC
+      timezone:
+        name: UTC
+    
+    - name: Configure audit daemon
+      template:
+        src: templates/auditd.conf
+        dest: /etc/audit/auditd.conf
+        mode: '0640'
+        backup: yes
+      notify: restart auditd
+    
+    - name: Add audit rules
+      template:
+        src: templates/audit.rules
+        dest: /etc/audit/rules.d/audit.rules
+        mode: '0640'
+      notify: restart auditd
+    
+    - name: Disable unused services
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+      loop:
+        - cups
+        - avahi-daemon
+        - bluetooth
+      ignore_errors: yes
+    
+    - name: Remove unused packages
+      apt:
+        name:
+          - telnet
+          - rsh-client
+          - rsh-redone-client
+          - talk
+          - ntalk
+        state: absent
+        autoremove: yes
+    
+    - name: Create VPN operations user
+      user:
+        name: vpnops
+        groups: sudo
+        shell: /bin/bash
+        create_home: yes
+        state: present
+    
+    - name: Set up SSH key for vpnops user
+      authorized_key:
+        user: vpnops
+        state: present
+        key: "{{ vpnops_ssh_key | default('') }}"
+      when: vpnops_ssh_key is defined
+    
+    - name: Configure sudo for vpnops user
+      copy:
+        content: |
+          # VPN operations user sudo configuration
+          vpnops ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/bin/wg-quick, /bin/systemctl restart wg-quick@*, /bin/systemctl status wg-quick@*
+        dest: /etc/sudoers.d/vpnops
+        mode: '0440'
+        validate: visudo -cf %s
+    
+    - name: Create monitoring user for Prometheus
+      user:
+        name: prometheus
+        system: yes
+        shell: /bin/false
+        home: /var/lib/prometheus
+        create_home: no
+        state: present
+    
+    - name: Install and configure node_exporter
+      get_url:
+        url: https://github.com/prometheus/node_exporter/releases/download/v1.6.1/node_exporter-1.6.1.linux-amd64.tar.gz
+        dest: /tmp/node_exporter.tar.gz
+        mode: '0644'
+    
+    - name: Extract node_exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp
+        remote_src: yes
+    
+    - name: Install node_exporter binary
+      copy:
+        src: /tmp/node_exporter-1.6.1.linux-amd64/node_exporter
+        dest: /usr/local/bin/node_exporter
+        mode: '0755'
+        remote_src: yes
+    
+    - name: Create node_exporter service
+      template:
+        src: templates/node_exporter.service
+        dest: /etc/systemd/system/node_exporter.service
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart node_exporter
+    
+    - name: Enable and start node_exporter
+      systemd:
+        name: node_exporter
+        enabled: yes
+        state: started
+    
+    - name: Set up log cleanup cron job
+      cron:
+        name: "VPN log cleanup"
+        minute: "0"
+        hour: "2"
+        job: "find /var/log -name '*.log' -mtime +{{ log_retention_days }} -delete"
+        user: root
+    
+    - name: Configure file permissions for security
+      file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+      loop:
+        - { path: '/etc/ssh/sshd_config', mode: '0600' }
+        - { path: '/etc/shadow', mode: '0640', group: 'shadow' }
+        - { path: '/etc/gshadow', mode: '0640', group: 'shadow' }
+        - { path: '/etc/passwd', mode: '0644' }
+        - { path: '/etc/group', mode: '0644' }
+    
+    - name: Ensure critical directories exist with correct permissions
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+      loop:
+        - { path: '/etc/wireguard', mode: '0700' }
+        - { path: '/var/log/vpn', mode: '0750', group: 'adm' }
+        - { path: '/opt/vpn-scripts', mode: '0755' }
+    
+  handlers:
+    - name: restart ssh
+      systemd:
+        name: ssh
+        state: restarted
+    
+    - name: restart fail2ban
+      systemd:
+        name: fail2ban
+        state: restarted
+    
+    - name: restart rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
+    
+    - name: restart chrony
+      systemd:
+        name: chrony
+        state: restarted
+    
+    - name: restart auditd
+      systemd:
+        name: auditd
+        state: restarted
+    
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+    
+    - name: restart node_exporter
+      systemd:
+        name: node_exporter
+        state: restarted

@@ -1,0 +1,89 @@
+# OpenSSH Server Configuration - Hardened for VPN Infrastructure
+# This configuration prioritizes security while maintaining operational access
+
+# Network Configuration
+Port {{ ssh_port }}
+AddressFamily inet
+ListenAddress 0.0.0.0
+
+# Protocol Configuration
+Protocol 2
+
+# Cryptographic Configuration
+# Use only strong ciphers
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha2-256,hmac-sha2-512
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256
+
+# Host Key Configuration
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Authentication Configuration
+LoginGraceTime 30
+PermitRootLogin no
+StrictModes yes
+MaxAuthTries 3
+MaxSessions 5
+MaxStartups 5:30:10
+
+# Public Key Authentication
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Password Authentication (Disabled for security)
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+
+# Kerberos and GSSAPI (Disabled)
+KerberosAuthentication no
+GSSAPIAuthentication no
+
+# User/Group Access Control
+AllowUsers {{ allowed_users | join(' ') }}
+DenyUsers root
+
+# Network and Connection Settings
+TCPKeepAlive yes
+ClientAliveInterval 300
+ClientAliveCountMax 2
+Compression no
+
+# Forwarding Configuration
+AllowAgentForwarding no
+AllowTcpForwarding no
+GatewayPorts no
+X11Forwarding no
+PermitTunnel no
+
+# Environment Configuration
+PermitUserEnvironment no
+AcceptEnv LANG LC_*
+
+# Subsystem Configuration
+Subsystem sftp /usr/lib/openssh/sftp-server -f AUTHPRIV -l INFO
+
+# Logging Configuration
+SyslogFacility AUTHPRIV
+LogLevel INFO
+
+# Banner Configuration
+Banner /etc/issue.net
+
+# Privilege Separation
+UsePrivilegeSeparation sandbox
+
+# DNS Configuration
+UseDNS no
+
+# Misc Security Settings
+PermitUserRC no
+HostbasedAuthentication no
+IgnoreUserKnownHosts yes
+IgnoreRhosts yes
+PrintMotd no
+PrintLastLog yes
+DebianBanner no
