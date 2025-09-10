@@ -1,0 +1,86 @@
+# Example Terraform Variables Configuration
+# Copy this file to terraform.tfvars and customize for your deployment
+
+# Environment Configuration
+environment = "production"
+aws_region  = "eu-west-1"
+owner       = "vpn-ops-team"
+
+# Domain Configuration
+# Set these to your actual domains, or use defaults for testing
+domain_name        = "vpn.yourdomain.com"
+management_domain  = "mgmt.yourdomain.com"
+
+# SSH Key Configuration
+# Create this key pair in AWS EC2 console or via AWS CLI
+key_name = "vpn-keypair"
+
+# Network Configuration
+vpc_cidr               = "10.0.0.0/16"
+public_subnet_cidrs    = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs   = ["10.0.10.0/24", "10.0.20.0/24"]
+
+# WireGuard Configuration
+wireguard_port    = 51820
+wireguard_network = "10.8.0.0/24"
+
+# Security Configuration
+# IMPORTANT: Replace with your actual IP addresses for production
+ssh_allowed_cidrs        = ["0.0.0.0/0"]  # Restrict to your IP ranges
+management_allowed_cidrs = ["0.0.0.0/0"]  # Restrict to admin IP ranges
+
+# Instance Configuration
+instance_type            = "t3.medium"    # VPN servers
+management_instance_type = "t3.small"     # Management server
+
+# Auto Scaling Configuration
+min_size         = 2
+max_size         = 10
+desired_capacity = 2
+
+# Monitoring Configuration
+enable_detailed_monitoring = true
+log_retention_days         = 7  # Privacy-focused minimal retention
+
+# Cost Optimization
+enable_spot_instances = false  # Set to true for non-production to save costs
+spot_max_price       = "0.05"
+
+# Backup Configuration
+backup_retention_days = 7  # Minimal for privacy compliance
+
+# Additional tags for resource organization
+additional_tags = {
+  Project     = "VPN-Solution"
+  CostCenter  = "IT-Infrastructure"
+  Compliance  = "GDPR"
+}
+
+# Example configurations for different environments:
+
+# Development Environment:
+# environment = "dev"
+# instance_type = "t3.micro"
+# management_instance_type = "t3.micro"
+# min_size = 1
+# max_size = 2
+# desired_capacity = 1
+# enable_spot_instances = true
+
+# Staging Environment:
+# environment = "staging"
+# domain_name = "vpn-staging.yourdomain.com"
+# management_domain = "mgmt-staging.yourdomain.com"
+# instance_type = "t3.small"
+# min_size = 1
+# max_size = 3
+# desired_capacity = 1
+
+# Production Environment (High Availability):
+# environment = "production"
+# instance_type = "t3.large"
+# management_instance_type = "t3.medium"
+# min_size = 3
+# max_size = 20
+# desired_capacity = 3
+# enable_detailed_monitoring = true

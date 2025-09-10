@@ -1,0 +1,186 @@
+# Ansible Inventory Example for VPN Solution
+# Copy this file to hosts.yml and customize for your deployment
+
+all:
+  vars:
+    # Global variables for all hosts
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/vpn-keypair.pem
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+    
+    # Environment configuration
+    environment: production
+    
+    # VPN configuration
+    wireguard_port: 51820
+    wireguard_network: "10.8.0.0/24"
+    
+    # Security settings
+    fail2ban_maxretry: 3
+    fail2ban_bantime: 3600
+    ssh_port: 22
+    
+    # Monitoring
+    node_exporter_port: 9100
+    log_level: INFO
+
+  children:
+    # WireGuard VPN Servers
+    vpn_servers:
+      hosts:
+        # These will be populated dynamically from Terraform outputs
+        # or you can manually specify server IPs here
+        # vpn-server-1:
+        #   ansible_host: 10.0.1.100
+        #   wireguard_server_id: 1
+        # vpn-server-2:
+        #   ansible_host: 10.0.2.100
+        #   wireguard_server_id: 2
+      vars:
+        # Variables specific to VPN servers
+        server_type: wireguard
+        
+        # WireGuard specific configuration
+        wg_interface: wg0
+        wg_port: "{{ wireguard_port }}"
+        wg_network: "{{ wireguard_network }}"
+        
+        # Firewall rules specific to VPN servers
+        ufw_rules:
+          - { rule: 'allow', port: '{{ ssh_port }}', proto: 'tcp' }
+          - { rule: 'allow', port: '{{ wireguard_port }}', proto: 'udp' }
+          - { rule: 'allow', port: '8080', proto: 'tcp' }  # Health check
+          - { rule: 'allow', port: '{{ node_exporter_port }}', proto: 'tcp', src: '10.0.0.0/16' }
+        
+        # Service configuration
+        required_services:
+          - wg-quick@wg0
+          - fail2ban
+          - ufw
+          - node_exporter
+          - wireguard-health
+
+    # Management Server
+    management_servers:
+      hosts:
+        # This will be populated from Terraform outputs
+        # management:
+        #   ansible_host: 10.0.1.200
+      vars:
+        # Variables specific to management server
+        server_type: management
+        
+        # Application configuration
+        app_port: 8000
+        nginx_port: 80
+        nginx_ssl_port: 443
+        
+        # Docker configuration
+        docker_compose_file: /opt/vpn-management/docker-compose.yml
+        
+        # Monitoring ports
+        prometheus_port: 9090
+        grafana_port: 3000
+        loki_port: 3100
+        
+        # Firewall rules specific to management server
+        ufw_rules:
+          - { rule: 'allow', port: '{{ ssh_port }}', proto: 'tcp' }
+          - { rule: 'allow', port: '{{ nginx_port }}', proto: 'tcp' }
+          - { rule: 'allow', port: '{{ nginx_ssl_port }}', proto: 'tcp' }
+          - { rule: 'allow', port: '{{ node_exporter_port }}', proto: 'tcp', src: '10.0.0.0/16' }
+        
+        # Required services
+        required_services:
+          - nginx
+          - docker
+          - fail2ban
+          - ufw
+          - node_exporter
+
+    # Monitoring-specific grouping
+    monitoring:
+      hosts:
+        # Include management server for monitoring
+      vars:
+        # Monitoring configuration
+        prometheus_retention: 7d
+        grafana_admin_password: "{{ vault_grafana_admin_password | default('admin123!') }}"
+        
+        # Alert configuration
+        alert_rules:
+          - high_cpu
+          - high_memory
+          - disk_space
+          - service_down
+          - certificate_expiry
+
+# Environment-specific configurations
+# You can create separate inventory files for different environments
+
+# Development Environment Example:
+# dev:
+#   children:
+#     vpn_servers:
+#       hosts:
+#         vpn-dev-1:
+#           ansible_host: 10.0.1.10
+#       vars:
+#         instance_type: t3.micro
+#         min_instances: 1
+#     management_servers:
+#       hosts:
+#         mgmt-dev:
+#           ansible_host: 10.0.1.20
+#       vars:
+#         instance_type: t3.micro
+
+# Staging Environment Example:
+# staging:
+#   children:
+#     vpn_servers:
+#       hosts:
+#         vpn-staging-1:
+#           ansible_host: 10.0.1.50
+#         vpn-staging-2:
+#           ansible_host: 10.0.2.50
+#       vars:
+#         instance_type: t3.small
+#     management_servers:
+#       hosts:
+#         mgmt-staging:
+#           ansible_host: 10.0.1.60
+
+# Production Environment Example:
+# production:
+#   children:
+#     vpn_servers:
+#       hosts:
+#         vpn-prod-1:
+#           ansible_host: 10.0.1.100
+#         vpn-prod-2:
+#           ansible_host: 10.0.2.100
+#         vpn-prod-3:
+#           ansible_host: 10.0.1.101
+#       vars:
+#         instance_type: t3.medium
+#         enable_monitoring: true
+#     management_servers:
+#       hosts:
+#         mgmt-prod:
+#           ansible_host: 10.0.1.200
+#       vars:
+#         instance_type: t3.small
+#         enable_ssl: true
+#         backup_enabled: true
+
+# Host groups for specific operations
+# maintenance:
+#   children:
+#     - vpn_servers
+#     - management_servers
+
+# security_scan:
+#   children:
+#     - vpn_servers
+#     - management_servers
