@@ -1,0 +1,309 @@
+# CI/CD Pipeline for VPN Solution
+# Handles testing, building, and deployment automation
+
+name: VPN Solution CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-1
+  TERRAFORM_VERSION: 1.6.0
+  ANSIBLE_VERSION: 2.15.0
+
+jobs:
+  # Lint and validate code
+  lint-and-validate:
+    name: Lint and Validate
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Terraform Format Check
+      run: |
+        cd terraform
+        terraform fmt -check -recursive
+    
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init -backend=false
+    
+    - name: Terraform Validate
+      run: |
+        cd terraform
+        terraform validate
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install Ansible
+      run: |
+        pip install ansible==${{ env.ANSIBLE_VERSION }}
+        pip install ansible-lint
+    
+    - name: Ansible Lint
+      run: |
+        cd ansible
+        ansible-lint site.yml
+    
+    - name: Validate Ansible Playbook
+      run: |
+        cd ansible
+        ansible-playbook --syntax-check site.yml
+    
+    - name: Lint Shell Scripts
+      run: |
+        sudo apt-get update && sudo apt-get install -y shellcheck
+        find . -name "*.sh" -exec shellcheck {} \;
+    
+    - name: Validate Docker Files
+      run: |
+        sudo apt-get install -y hadolint
+        find . -name "Dockerfile" -exec hadolint {} \;
+
+  # Security scanning
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: lint-and-validate
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Setup tfsec
+      run: |
+        curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+        sudo mv tfsec /usr/local/bin/
+    
+    - name: Run tfsec
+      run: |
+        cd terraform
+        tfsec . --format json --out tfsec-results.json
+      continue-on-error: true
+    
+    - name: Upload tfsec results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: tfsec-results
+        path: terraform/tfsec-results.json
+
+  # Build Docker images
+  build-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [lint-and-validate, security-scan]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build and push VPN client image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./client-configs/docker
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: |
+          vpnsolution/wireguard-client:latest
+          vpnsolution/wireguard-client:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Infrastructure testing
+  infrastructure-test:
+    name: Infrastructure Testing
+    runs-on: ubuntu-latest
+    needs: lint-and-validate
+    if: github.event_name == 'pull_request'
+    
+    env:
+      TF_VAR_environment: "test"
+      TF_VAR_domain_name: "test.example.com"
+      TF_VAR_management_domain: "test-mgmt.example.com"
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform init
+        terraform plan -out=tfplan
+    
+    - name: Upload Terraform Plan
+      uses: actions/upload-artifact@v3
+      with:
+        name: terraform-plan
+        path: terraform/tfplan
+
+  # Deploy to staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-images, infrastructure-test]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Deploy Infrastructure
+      run: |
+        cd terraform
+        terraform init
+        terraform apply -auto-approve \
+          -var="environment=staging" \
+          -var="domain_name=${{ secrets.STAGING_DOMAIN }}" \
+          -var="management_domain=${{ secrets.STAGING_MGMT_DOMAIN }}"
+    
+    - name: Run Integration Tests
+      run: |
+        # Wait for infrastructure to be ready
+        sleep 300
+        
+        # Run integration tests
+        ./scripts/integration-tests.sh staging
+    
+    - name: Notify on Success
+      if: success()
+      run: |
+        echo "Staging deployment successful"
+        # Add notification logic (Slack, email, etc.)
+    
+    - name: Notify on Failure
+      if: failure()
+      run: |
+        echo "Staging deployment failed"
+        # Add notification logic
+
+  # Deploy to production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-images]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Deploy Infrastructure
+      run: |
+        cd terraform
+        terraform init
+        terraform apply -auto-approve \
+          -var="environment=production" \
+          -var="domain_name=${{ secrets.PRODUCTION_DOMAIN }}" \
+          -var="management_domain=${{ secrets.PRODUCTION_MGMT_DOMAIN }}"
+    
+    - name: Run Smoke Tests
+      run: |
+        # Wait for infrastructure to be ready
+        sleep 300
+        
+        # Run smoke tests
+        ./scripts/smoke-tests.sh production
+    
+    - name: Notify on Success
+      if: success()
+      run: |
+        echo "Production deployment successful"
+        # Add notification logic
+    
+    - name: Notify on Failure
+      if: failure()
+      run: |
+        echo "Production deployment failed"
+        # Add notification logic and rollback
+
+  # Cleanup ephemeral environments
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    
+    steps:
+    - name: Cleanup test resources
+      run: |
+        echo "Cleaning up test resources"
+        # Add cleanup logic for test environments

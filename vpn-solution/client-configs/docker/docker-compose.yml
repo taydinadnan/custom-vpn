@@ -1,0 +1,114 @@
+# WireGuard VPN Client Docker Compose Configuration
+# Use this to run the VPN client as a Docker service
+
+version: '3.8'
+
+services:
+  wireguard-client:
+    build: .
+    container_name: wireguard-vpn-client
+    restart: unless-stopped
+    
+    # Network configuration
+    network_mode: "host"  # Required for VPN functionality
+    
+    # Capabilities required for network management
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    
+    # Privileged mode (required for network interface management)
+    privileged: true
+    
+    # Environment variables (replace with actual values)
+    environment:
+      # WireGuard Configuration
+      - WG_PRIVATE_KEY=YOUR_PRIVATE_KEY_HERE
+      - WG_ADDRESS=10.8.0.2/32
+      - WG_SERVER_PUBLIC_KEY=SERVER_PUBLIC_KEY_HERE
+      - WG_ENDPOINT=vpn.example.com:51820
+      - WG_DNS=1.1.1.1,1.0.0.1
+      - WG_ALLOWED_IPS=0.0.0.0/0,::/0
+      - WG_KEEPALIVE=25
+      
+      # Container Configuration
+      - WG_INTERFACE=wg0
+      - HEALTH_CHECK_INTERVAL=30
+      - LOG_LEVEL=INFO
+    
+    # Volumes
+    volumes:
+      - ./config:/etc/wireguard:ro  # Mount configuration directory
+      - /lib/modules:/lib/modules:ro  # Required for kernel modules
+    
+    # DNS configuration
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    
+    # Health check
+    healthcheck:
+      test: ["/usr/local/bin/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Labels
+    labels:
+      - "com.vpn.service=wireguard-client"
+      - "com.vpn.environment=production"
+
+# Optional: Add a separate container for monitoring/management
+  vpn-monitor:
+    image: alpine:latest
+    container_name: vpn-monitor
+    restart: unless-stopped
+    depends_on:
+      - wireguard-client
+    
+    command: |
+      sh -c "
+      apk add --no-cache curl &&
+      while true; do
+        echo \"[$(date)] Checking VPN status...\"
+        if curl -f -s http://localhost:8080/health; then
+          echo \"[$(date)] VPN is healthy\"
+        else
+          echo \"[$(date)] VPN health check failed\"
+        fi
+        sleep 300
+      done
+      "
+    
+    network_mode: "service:wireguard-client"
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# Networks (if not using host networking)
+# networks:
+#   vpn-network:
+#     driver: bridge
+#     ipam:
+#       config:
+#         - subnet: 172.20.0.0/16
+
+# Volumes for persistent data
+volumes:
+  config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./config
